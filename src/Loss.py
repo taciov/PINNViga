@@ -15,27 +15,35 @@ def physics_loss(model, x, EI, q):
     
     return torch.mean(f**2)
 
-def boundary_loss(model, EI, L=1.0): 
-    # Mantenha os tensores de contorno como folhas com requires_grad=True
+def boundary_loss(model, EI, L, apoio_esq, apoio_dir):
+    bc_loss = 0.0
+
     x0 = torch.tensor([[0.0]], requires_grad=True)
     xL = torch.tensor([[L]], requires_grad=True)
-    
-    u0 = model(x0)
-    uL = model(xL)
-    
-    loss_u0 = u0**2
-    loss_uL = uL**2
-    
-    u0_output = model(x0)
-    u0_x = torch.autograd.grad(u0_output, x0, torch.ones_like(u0_output), create_graph=True)[0]
+
+    u_0 = model(x0)
+    u_L = model(xL)
+
+    u0_x = torch.autograd.grad(u_0, x0, torch.ones_like(u_0), create_graph=True)[0]
     u0_xx = torch.autograd.grad(u0_x, x0, torch.ones_like(u0_x), create_graph=True)[0]
-    loss_u0_xx = u0_xx**2
     
-    uL_output = model(xL)
-    uL_x = torch.autograd.grad(uL_output, xL, torch.ones_like(uL_output), create_graph=True)[0]
+    uL_x = torch.autograd.grad(u_L, xL, torch.ones_like(u_L), create_graph=True)[0]
     uL_xx = torch.autograd.grad(uL_x, xL, torch.ones_like(uL_x), create_graph=True)[0]
-    loss_uL_xx = uL_xx**2
-    
-    bc_loss = loss_u0 + loss_uL + loss_u0_xx + loss_uL_xx
-    
+
+    if apoio_esq[1] == 1:
+        bc_loss += u_0**2
+
+    if apoio_esq[2] == 1: 
+        bc_loss += u0_x**2
+    else:
+        bc_loss += u0_xx**2
+
+    if apoio_dir[1] == 1:
+        bc_loss += u_L**2
+
+    if apoio_dir[2] == 1:
+        bc_loss += uL_x**2
+    else:
+        bc_loss += uL_xx**2
+
     return bc_loss.mean()
