@@ -15,7 +15,7 @@ def set_seed(seed=1):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-def physics_loss(model, x, L, EI, q):
+def physics_loss(model, x):
     u = model(x)
     
     u_x = torch.autograd.grad(u, x, torch.ones_like(u), create_graph=True)[0]
@@ -23,42 +23,31 @@ def physics_loss(model, x, L, EI, q):
     u_xxx = torch.autograd.grad(u_xx, x, torch.ones_like(u_xx), create_graph=True)[0]
     u_xxxx = torch.autograd.grad(u_xxx, x, torch.ones_like(u_xxx), create_graph=True)[0]
     
-    q_tensor = torch.full_like(u_xxxx, float(q))   # cria tensor do mesmo shape que u_xxxx
-    f = EI * u_xxxx - q_tensor
+    f = u_xxxx - 1.0
 
-    # f_scale = torch.max(torch.abs(torch.cat([EI*u_xxxx, q_tensor]))).detach() + 1e-8
-    
-    # return torch.sum(f**2)
     return torch.mean((f) ** 2)
-    # return torch.mean((f / f_scale) ** 2)
 
-def boundary_loss(model, q, L, apoio_esq, apoio_dir):
-    bc_loss = 0.0
-
+def boundary_loss(model, apoio_esq, apoio_dir):
     x0 = torch.tensor([[0.0]], requires_grad=True)
-    xL = torch.tensor([[L]], requires_grad=True)
+    xL = torch.tensor([[1.0]], requires_grad=True)
 
     u_0 = model(x0)
     u_L = model(xL)
 
     u0_x = torch.autograd.grad(u_0, x0, torch.ones_like(u_0), create_graph=True)[0]
     u0_xx = torch.autograd.grad(u0_x, x0, torch.ones_like(u0_x), create_graph=True)[0]
-    u0_xxx = torch.autograd.grad(u0_xx, x0, torch.ones_like(u0_x), create_graph=True)[0]
-    u0_xxxx = torch.autograd.grad(u0_xxx, x0, torch.ones_like(u0_x), create_graph=True)[0]
+    u0_xxx = torch.autograd.grad(u0_xx, x0, torch.ones_like(u0_xx), create_graph=True)[0]
 
     uL_x = torch.autograd.grad(u_L, xL, torch.ones_like(u_L), create_graph=True)[0]
     uL_xx = torch.autograd.grad(uL_x, xL, torch.ones_like(uL_x), create_graph=True)[0]
     uL_xxx = torch.autograd.grad(uL_xx, xL, torch.ones_like(uL_xx), create_graph=True)[0]
-    uL_xxxx = torch.autograd.grad(uL_xxx, xL, torch.ones_like(uL_xxx), create_graph=True)[0]
 
-    # u_scale = torch.max(torch.abs(torch.cat([u_0, u_L]))).detach() + 1e-8
-    # u_x_scale = torch.max(torch.abs(torch.cat([u0_x, uL_x]))).detach() + 1e-8
-    # u_xx_scale = torch.max(torch.abs(torch.cat([u0_xx, uL_xx]))).detach() + 1e-8
-    # u_xxx_scale = torch.max(torch.abs(torch.cat([u0_xxx, uL_xxx]))).detach() + 1e-8
-    # u_xxxx_scale = torch.max(torch.abs(torch.cat([u0_xxxx, uL_xxxx]))).detach() + 1e-8
+    bc_loss = 0.0
 
     if apoio_esq[1] == 1:
         bc_loss += (u_0)**2
+    else:
+        bc_loss += (u0_xxx)**2
 
     if apoio_esq[2] == 1: 
         bc_loss += (u0_x)**2
@@ -67,31 +56,14 @@ def boundary_loss(model, q, L, apoio_esq, apoio_dir):
 
     if apoio_dir[1] == 1:
         bc_loss += (u_L)**2
+    else:
+        bc_loss += (uL_xxx)**2
 
     if apoio_dir[2] == 1:
         bc_loss += (uL_x)**2
     else:
         bc_loss += (uL_xx)**2
 
-    # if apoio_esq[1] == 1:
-    #     bc_loss += (u_0 / u_scale)**2
-
-    # if apoio_esq[2] == 1: 
-    #     bc_loss += (u0_x / u_x_scale)**2
-    # else:
-    #     bc_loss += (u0_xx / u_xx_scale)**2
-
-    # if apoio_dir[1] == 1:
-    #     bc_loss += (u_L / u_scale)**2
-
-    # if apoio_dir[2] == 1:
-    #     bc_loss += (uL_x / u_x_scale)**2
-    # else:
-    #     bc_loss += (uL_xx / u_xx_scale)**2
-
-    # bc_loss += (u0_xxxx ** 2 + uL_xxxx ** 2)
-
-    # return bc_loss.sum()
     return bc_loss.mean()
 
 class PINNViga(nn.Module):
@@ -121,7 +93,8 @@ class PINNViga(nn.Module):
     def bc_weight(self):
         return torch.exp(self.log_bc_weight)
 
-    def run_model(self, apoio_esq, apoio_dir, EI, q, L, num_epochs=1000, pde_weight = 1.0, bc_weight = 1.0, min_delta=1e-6, tol = 1e-4,tam = 101):
+    def run_model(self, apoio_esq, apoio_dir, EI, q, L, num_epochs=1000, pde_weight = 1.0, bc_weight = 1.0, min_delta=1e-6, tol = 1e-5,tam = 101):
+        u_ref = q * (L**4) / EI
         set_seed(1)
         L = float(L)
         self.model = PINNViga()
@@ -130,7 +103,6 @@ class PINNViga(nn.Module):
         self.loss_pde_variation = []
         self.loss_bc_variation = []
 
-        # Variáveis para o early stopping
         best_loss = float('inf')
         best_state = None
 
@@ -138,12 +110,11 @@ class PINNViga(nn.Module):
         min_val = 0
         max_val = 1
         x_scaled = min_val + (max_val - min_val) * torch.rand(tam, 1)
-        x_train = (x_scaled * L).requires_grad_(True)
+        x_train = x_scaled.requires_grad_(True)
 
         for epoch in range(num_epochs + 1):
-            
-            loss_pde = physics_loss(self.model, x_train, L, EI, q)
-            loss_bc = boundary_loss(self.model, q, L, apoio_esq, apoio_dir)
+            loss_pde = physics_loss(self.model, x_train)
+            loss_bc = boundary_loss(self.model, apoio_esq, apoio_dir)
 
             optimizer.zero_grad()
 
@@ -164,9 +135,11 @@ class PINNViga(nn.Module):
             if epoch % int(num_epochs / 10) == 0:
                 print(f"Epoch {epoch}, Loss: {loss.item():.12f}, PDE Loss: {loss_pde.item():.12f}, BC Loss: {loss_bc.item():.12f}")
 
-            x_plot = torch.linspace(0, L, tam).view(-1,1)
-            self.u_plot = self.model(x_plot).detach().numpy()
-            self.x_plot = x_plot.numpy()
+            x_plot = torch.linspace(0, 1, tam).view(-1,1)
+            u_plot_star = self.model(x_plot).detach().numpy()
+            u_plot = u_plot_star * u_ref
+            self.x_plot = (x_plot.numpy() * L)
+            self.u_plot = u_plot
             self.u_plot_variation.append((epoch, self.u_plot))
             self.loss_pde_variation.append(loss_pde)
             self.loss_bc_variation.append(loss_bc)
@@ -189,35 +162,3 @@ class PINNViga(nn.Module):
         plt.xlim(0, max(valores_epoch))
         plt.ylim(0, 1.05 * max(valores_total) / scale)
         plt.legend()
-
-    # def run_model_adaptive(self, apoio_esq, apoio_dir, EI, q, L, num_epochs=1000):
-    #     L = float(L)
-    #     model = PINNViga()
-        
-    #     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    #     self.u_plot_variation = []
-
-    #     x_train_raw = torch.rand(101, 1)
-    #     x_train = (x_train_raw * L).requires_grad_(True)
-
-    #     for epoch in range(num_epochs + 1):
-    #         optimizer.zero_grad()
-            
-    #         loss_pde = physics_loss(model, x_train, EI, q)
-    #         loss_bc = boundary_loss(model, L, apoio_esq, apoio_dir)
-            
-    #         loss = model.pde_weight * loss_pde + model.bc_weight * loss_bc
-
-    #         loss.backward()
-    #         optimizer.step()
-            
-    #         if epoch % int(num_epochs / 10) == 0:
-    #             print(f"Epoch {epoch}, Total Loss: {loss.item():.6f}, "
-    #                 f"PDE Loss: {loss_pde.item():.6f}, BC Loss: {loss_bc.item():.6f}, "
-    #                 f"PDE Weight: {model.pde_weight.item():.4f}, BC Weight: {model.bc_weight.item():.4f}")
-
-    #         x_plot = torch.linspace(0, L, 100).view(-1,1)
-    #         self.u_plot = model(x_plot).detach().numpy()
-    #         self.x_plot = x_plot.numpy()
-
-    #         self.u_plot_variation.append((epoch, self.u_plot))
