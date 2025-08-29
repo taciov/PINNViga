@@ -1,3 +1,4 @@
+import copy
 import torch
 import torch.nn as nn
 import numpy as np
@@ -84,16 +85,12 @@ class PINNViga(nn.Module):
 
     def forward(self, x):
         return self.net(x)
-    
-    @property
-    def pde_weight(self):
-        return torch.exp(self.log_pde_weight)
 
-    @property
-    def bc_weight(self):
-        return torch.exp(self.log_bc_weight)
-
-    def run_model(self, apoio_esq, apoio_dir, EI, q, L, num_epochs=1000, pde_weight = 1.0, bc_weight = 1.0, min_delta=1e-6, tol = 1e-5,tam = 101):
+    def run_model(self, apoio_esq, apoio_dir, EI, q, L,
+                  num_epochs=5000, pde_weight=1.0, bc_weight=1.0,
+                  min_delta=1e-6, tol=2e-5, tam=101,
+                  patience=200):
+        
         u_ref = q * (L**4) / EI
         set_seed(1)
         L = float(L)
@@ -105,6 +102,10 @@ class PINNViga(nn.Module):
 
         best_loss = float('inf')
         best_state = None
+        best_epoch = 0
+
+        wait = 0
+        prev_loss = None
 
         torch.manual_seed(1)
         min_val = 0
@@ -120,16 +121,26 @@ class PINNViga(nn.Module):
 
             loss = pde_weight * loss_pde + bc_weight * loss_bc
 
-            loss.backward()
+            loss.backward()            
             optimizer.step()
-
             current_loss = loss.item()
+
             if current_loss < best_loss - min_delta:
                 best_loss = current_loss
                 best_state = self.model.state_dict()
-            elif (current_loss > best_loss + min_delta) and (float(loss_bc) <= tol) and (float(loss_pde) <= tol):
+                best_epoch = epoch
+                wait = 0
+            else:
+                if prev_loss is not None:
+                    delta = abs(current_loss - prev_loss) / prev_loss
+                    if delta < 1e-3:
+                        wait += 1
+                    else:
+                        wait = 0
+
+            if (float(loss_bc) <= tol and float(loss_pde) <= tol) or (wait >= patience):
                 print(f"Epoch {epoch}, Loss: {loss.item():.12f}, PDE Loss: {loss_pde.item():.12f}, BC Loss: {loss_bc.item():.12f}")
-                print(f"Treinamento interrompido na época {epoch} devido à falta de melhoria.")
+                print(f"Treinamento interrompido na época {epoch}.")
                 break
                        
             if epoch % int(num_epochs / 10) == 0:
@@ -146,6 +157,7 @@ class PINNViga(nn.Module):
 
         if best_state is not None:
             self.model.load_state_dict(best_state)
+            print(f"Melhor estado restaurado da época {best_epoch} com perda {best_loss:.6e}")
 
         self.loss = self.loss_pde_variation + self.loss_bc_variation
 
