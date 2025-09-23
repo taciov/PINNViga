@@ -16,7 +16,7 @@ def set_seed(seed=1):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-def obter_trechos_cargas(lista_cargas, apoio_esq, apoio_dir):
+def obter_trechos_cargas(lista_apoios, lista_cargas):
     posicoes_x = []
 
     for carga in lista_cargas:
@@ -25,7 +25,7 @@ def obter_trechos_cargas(lista_cargas, apoio_esq, apoio_dir):
         if carga.x1 not in posicoes_x:
             posicoes_x.append(carga.x1)
 
-    for apoio in [apoio_esq, apoio_dir]:
+    for apoio in lista_apoios:
         if apoio.x not in posicoes_x:
             posicoes_x.append(apoio.x)
 
@@ -80,12 +80,11 @@ def interface_loss(model, x):
 
     # Continuidade de u, u', u''
     cont_loss = ((u_l - u_r) ** 2 +
-                (uxl - uxr) ** 2 + 
-                (uxxl - uxxr) ** 2)
+                (uxl - uxr) ** 2)
 
     return cont_loss
 
-def trecho_physics_loss(model, trechos_cargas, x):
+def trecho_physics_loss(model, trechos_cargas):
 
     loss_pde = 0
     loss_int = 0
@@ -93,61 +92,55 @@ def trecho_physics_loss(model, trechos_cargas, x):
     max_qy = max([abs(carga['qy']) for carga in trechos_cargas])
 
     for k, carga in enumerate(trechos_cargas):
-        x0 = carga['x0']
-        x1 = carga['x1']
+        L = 2
+
+        x0 = carga['x0'] / L
+        x1 = carga['x1'] / L
 
         qx = carga['qx']
         qy = carga['qy'] / max_qy
 
-        filter = (x >= x0) & (x <= x1)
-        x_train_subdomain = x[filter].view(-1, 1)
+        # filter = (x >= x0) & (x <= x1)
+        # x_train_subdomain = x[filter].view(-1, 1).requires_grad_(True)
 
-        x_train_subdomain.requires_grad_(True)
+        tam = max(int(round(abs(x1 - x0) * 100, 0)), 41)
+
+        torch.manual_seed(1)
+        min_val = 0
+        max_val = 1
+        x_scaled = min_val + (max_val - min_val) * torch.rand(tam, 1)
+        x_train_subdomain = x_scaled.requires_grad_(True)
+
         if x_train_subdomain.numel() > 0:
             loss_pde += physics_loss(model, x_train_subdomain, qy)
         if x0 != min([carga['x0'] for carga in trechos_cargas]):
             loss_int += interface_loss(model, x0)
 
-    return loss_pde
+    return loss_pde, loss_int
 
-def boundary_loss(model, apoio_esq, apoio_dir):
-    x0 = torch.tensor([[0.0]], requires_grad=True)
-    xL = torch.tensor([[1.0]], requires_grad=True)
+def boundary_loss(model, dados_apoios):
+    loss_bc = 0.0
+    for k, dict_apoio in enumerate(dados_apoios):
 
-    u_0 = model(x0)
-    u_L = model(xL)
+        x0 = torch.tensor([[dict_apoio['x']]], requires_grad=True)
 
-    u0_x = torch.autograd.grad(u_0, x0, torch.ones_like(u_0), create_graph=True)[0]
-    u0_xx = torch.autograd.grad(u0_x, x0, torch.ones_like(u0_x), create_graph=True)[0]
-    u0_xxx = torch.autograd.grad(u0_xx, x0, torch.ones_like(u0_xx), create_graph=True)[0]
+        u_0 = model(x0)
 
-    uL_x = torch.autograd.grad(u_L, xL, torch.ones_like(u_L), create_graph=True)[0]
-    uL_xx = torch.autograd.grad(uL_x, xL, torch.ones_like(uL_x), create_graph=True)[0]
-    uL_xxx = torch.autograd.grad(uL_xx, xL, torch.ones_like(uL_xx), create_graph=True)[0]
+        u0_x = torch.autograd.grad(u_0, x0, torch.ones_like(u_0), create_graph=True)[0]
+        u0_xx = torch.autograd.grad(u0_x, x0, torch.ones_like(u0_x), create_graph=True)[0]
+        u0_xxx = torch.autograd.grad(u0_xx, x0, torch.ones_like(u0_xx), create_graph=True)[0]
 
-    bc_loss = 0.0
+        if dict_apoio['graus'][1] == 1:
+            loss_bc += (u_0)**2
+        else:
+            loss_bc += (u0_xxx)**2
 
-    if apoio_esq[1] == 1:
-        bc_loss += (u_0)**2
-    else:
-        bc_loss += (u0_xxx)**2
+        if dict_apoio['graus'][2] == 1: 
+            loss_bc += (u0_x)**2
+        else:
+            loss_bc += (u0_xx)**2
 
-    if apoio_esq[2] == 1: 
-        bc_loss += (u0_x)**2
-    else:
-        bc_loss += (u0_xx)**2
-
-    if apoio_dir[1] == 1:
-        bc_loss += (u_L)**2
-    else:
-        bc_loss += (uL_xxx)**2
-
-    if apoio_dir[2] == 1:
-        bc_loss += (uL_x)**2
-    else:
-        bc_loss += (uL_xx)**2
-
-    return bc_loss.mean()
+    return loss_bc.mean()
 
 class PINNViga(nn.Module):
     def __init__(self):
@@ -165,76 +158,71 @@ class PINNViga(nn.Module):
     def forward(self, x):
         return self.net(x)
     
+    def tratar_apoios(self, lista_apoios):
+        valores_x = []
+        for apoio in lista_apoios:
+            valores_x.append(apoio.x)
+
+        x0 = min(valores_x)
+        xf = max(valores_x)
+
+        L = xf - x0
+
+        dados_apoios = []
+
+        for apoio in lista_apoios:
+            x_norm = (apoio.x - x0) / L
+            dict_temp = {
+                "x" : x_norm,
+                "graus" : apoio.graus
+            }
+            dados_apoios.append(dict_temp)
+
+        return float(L), dados_apoios
+    
+    # def ver_apoios():
+
+
     # def closure():
     #     optimizer.zero_grad()
 
-    def run_model(self, apoio_esq, apoio_dir, lista_cargas, EI, L,
+    def run_model(self, lista_apoios, lista_cargas, EI, 
                   num_epochs=5000, pde_weight=1.0, bc_weight=1.0,
-                  min_delta=1e-6, tol=2e-5, tam=101,
-                  patience=200):
+                  tol=1e-5, tol_apoio = 1e-5, tam=101):
         
+        L, dados_apoios = self.tratar_apoios(lista_apoios)
+
         set_seed(1)
-        L = float(L)
+
         self.model = PINNViga()
         optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
         self.u_plot_variation = []
         self.loss_pde_variation = []
         self.loss_bc_variation = []
+        self.loss_int_variation = []
 
-        best_loss = float('inf')
-        best_state = None
-        best_epoch = 0
-
-        wait = 0
-        prev_loss = None
-
-        torch.manual_seed(1)
-        min_val = 0
-        max_val = 1
-        x_scaled = min_val + (max_val - min_val) * torch.rand(tam, 1)
-        x_train = x_scaled.requires_grad_(True)
-
-        self.trechos_cargas = obter_trechos_cargas(lista_cargas, apoio_esq, apoio_dir)
+        self.trechos_cargas = obter_trechos_cargas(lista_apoios, lista_cargas)
         max_qy = max_qy = max([abs(carga['qy']) for carga in self.trechos_cargas])
 
         u_ref = max_qy * (L**4) / EI
 
         for epoch in range(num_epochs + 1):
-            # torch.manual_seed(1)
-            # min_val = 0
-            # max_val = 1
-            # x_scaled = min_val + (max_val - min_val) * torch.rand(tam, 1)
-            # x_train = x_scaled.requires_grad_(True)
-            # loss_pde = physics_loss(self.model, x_train)
 
             # if epoch >= max([0.3 * num_epochs, 350]):
             #     optimizer = torch.optim.LBFGS(self.model.parameters(), lr=0.001, max_iter=int(round(0.7 * num_epochs,0)))
 
             optimizer.zero_grad()
 
-            loss_pde = trecho_physics_loss(self.model, self.trechos_cargas, x_train)
-            loss_bc = boundary_loss(self.model, apoio_esq.graus, apoio_dir.graus)
+            loss_pde, loss_int = trecho_physics_loss(self.model, self.trechos_cargas)
+            loss_bc = boundary_loss(self.model, dados_apoios)
 
-            loss = pde_weight * loss_pde + bc_weight * loss_bc
+            loss = pde_weight * loss_pde + bc_weight * loss_bc + loss_int
 
             loss.backward()            
             optimizer.step()
-            current_loss = loss.item()
 
-            if current_loss < best_loss - min_delta:
-                best_loss = current_loss
-                best_state = self.model.state_dict()
-                best_epoch = epoch
-                wait = 0
-            else:
-                if prev_loss is not None:
-                    delta = abs(current_loss - prev_loss) / prev_loss
-                    if delta < 1e-3:
-                        wait += 1
-                    else:
-                        wait = 0
-
-            if (float(loss_bc) <= tol and float(loss_pde) <= tol) or (wait >= patience):
+            if (float(loss_bc) <= tol) and (float(loss_pde) <= tol):
+                print("Treinamento concluído pelo critério de tolerância da perda")
                 print(f"Epoch {epoch}, Loss: {loss.item():.12f}, PDE Loss: {loss_pde.item():.12f}, BC Loss: {loss_bc.item():.12f}")
                 print(f"Treinamento interrompido na época {epoch}.")
                 break
@@ -244,30 +232,41 @@ class PINNViga(nn.Module):
 
             x_plot = torch.linspace(0, 1, tam).view(-1,1)
             u_plot_star = self.model(x_plot).detach().numpy()
-            u_plot = u_plot_star * u_ref
+            self.u_plot = u_plot_star * u_ref
             self.x_plot = (x_plot.numpy() * L)
-            self.u_plot = u_plot
             self.u_plot_variation.append((epoch, self.u_plot))
             self.loss_pde_variation.append(loss_pde)
             self.loss_bc_variation.append(loss_bc)
+            self.loss_int_variation.append(loss_int)
 
-            self.x_train = x_train
+            ver_apoio = 0
+            lista_x = [float(x) for x in self.x_plot]
+            lista_u = [float(u) for u in self.u_plot]
 
-        if best_state is not None:
-            self.model.load_state_dict(best_state)
-            print(f"Melhor estado restaurado da época {best_epoch} com perda {best_loss:.6e}")
+            for k, apoio in enumerate(lista_apoios):
+                idx = int(lista_x.index(float(apoio.x)))
+                if abs(lista_u[idx]) <= tol_apoio:
+                    ver_apoio += 1
 
-        self.loss = self.loss_pde_variation + self.loss_bc_variation
+            if ver_apoio == len(lista_apoios):
+                print("Treinamento concluído pelo critério do deslocamento nos apoios")
+                print(f"Epoch {epoch}, Loss: {loss.item():.12f}, PDE Loss: {loss_pde.item():.12f}, BC Loss: {loss_bc.item():.12f}")
+                print(f"Treinamento interrompido na época {epoch}.")
+                break
+
+        self.loss = self.loss_pde_variation + self.loss_bc_variation + self.loss_int_variation
 
     def plot_errors(self, scale, nome = "erros.png"):
         valores_epoch = np.arange(0, len(self.u_plot_variation), 1)
         valores_bc = [float(loss) for loss in self.loss_bc_variation]
         valores_pde = [float(loss) for loss in self.loss_pde_variation]
-        valores_total = [bc + pde for bc, pde in zip(valores_bc, valores_pde)]
+        valores_int = [float(loss) for loss in self.loss_int_variation]
+        valores_total = [bc + pde for bc, pde, int in zip(valores_bc, valores_pde, valores_int)]
 
         plt.figure(figsize=(8, 4.5))
         plt.plot(valores_epoch, valores_bc, label = 'Perda CC', color = 'red', lw = 1)
         plt.plot(valores_epoch, valores_pde, label = 'Perda ED', color = 'blue', lw = 1)
+        plt.plot(valores_epoch, valores_int, label = 'Perda INT', color = 'orange', lw = 1)
         plt.plot(valores_epoch, valores_total, label = 'Perda Total', color = 'green', lw = 1)
         plt.title("Variação do erro durante o treinamento")
         plt.xlabel('Época')
