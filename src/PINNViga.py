@@ -16,7 +16,29 @@ def set_seed(seed=1):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-def obter_trechos_cargas(lista_apoios, lista_cargas):
+def inserir_apoios_no_trecho(lista_apoios, trechos_cargas):
+    for k, trecho in enumerate(trechos_cargas):
+        x0 = trecho['x0']
+        x1 = trecho['x1']
+
+        for apoio in lista_apoios:
+            if apoio.x == x0:
+                trecho['apoio0'] = apoio
+                apoio.trecho_dir = k
+
+            if apoio.x == x1:
+                trecho['apoio1'] = apoio
+                apoio.trecho_esq = k
+
+    for apoio in lista_apoios:
+        if apoio.trecho_esq is not None and apoio.trecho_dir is not None:
+            apoio.tipo = "int"
+        else:
+            apoio.tipo = "ext"
+
+    return trechos_cargas
+
+def obter_trechos_cargas(lista_apoios, lista_cargas, EI):
     posicoes_x = []
 
     for carga in lista_cargas:
@@ -38,7 +60,9 @@ def obter_trechos_cargas(lista_apoios, lista_cargas):
             "x0" : posicoes_x[k],
             "x1" : posicoes_x[k + 1],
             "qx" : 0,
-            "qy" : 0
+            "qy" : 0,
+            "L" : abs(posicoes_x[k + 1] - posicoes_x[k]),
+            "EI" : EI
         }
 
         for carga in lista_cargas:
@@ -48,225 +72,231 @@ def obter_trechos_cargas(lista_apoios, lista_cargas):
 
         trechos_cargas.append(dict_trecho)
 
-    return trechos_cargas
+    trechos_cargas = inserir_apoios_no_trecho(lista_apoios, trechos_cargas)
 
-def physics_loss(model, x, q):
-    u = model(x)
-    
-    u_x = torch.autograd.grad(u, x, torch.ones_like(u), create_graph=True)[0]
-    u_xx = torch.autograd.grad(u_x, x, torch.ones_like(u_x), create_graph=True)[0]
-    u_xxx = torch.autograd.grad(u_xx, x, torch.ones_like(u_xx), create_graph=True)[0]
-    u_xxxx = torch.autograd.grad(u_xxx, x, torch.ones_like(u_xxx), create_graph=True)[0]
-    
-    f = u_xxxx - q
-
-    return torch.mean((f) ** 2)
-
-def interface_loss(model, x):
-
-    eps = 1e-6
-    x_left = torch.tensor([[x - eps]], requires_grad=True)
-    x_right = torch.tensor([[x + eps]], requires_grad=True)
-
-    u_l = model(x_left)
-    uxl = torch.autograd.grad(u_l, x_left, torch.ones_like(u_l), create_graph=True)[0]
-    uxxl = torch.autograd.grad(uxl, x_left, torch.ones_like(uxl), create_graph=True)[0]
-    uxxxl = torch.autograd.grad(uxxl, x_left, torch.ones_like(uxxl), create_graph=True)[0]
-
-    u_r = model(x_right)
-    uxr = torch.autograd.grad(u_r, x_right, torch.ones_like(u_r), create_graph=True)[0]
-    uxxr = torch.autograd.grad(uxr, x_right, torch.ones_like(uxr), create_graph=True)[0]
-    uxxxr = torch.autograd.grad(uxxr, x_right, torch.ones_like(uxxr), create_graph=True)[0]
-
-    # Continuidade de u, u', u''
-    cont_loss = ((u_l - u_r) ** 2 +
-                (uxl - uxr) ** 2)
-
-    return cont_loss
-
-def trecho_physics_loss(model, trechos_cargas):
-
-    loss_pde = 0
-    loss_int = 0
-
-    max_qy = max([abs(carga['qy']) for carga in trechos_cargas])
-
-    for k, carga in enumerate(trechos_cargas):
-        L = 2
-
-        x0 = carga['x0'] / L
-        x1 = carga['x1'] / L
-
-        qx = carga['qx']
-        qy = carga['qy'] / max_qy
-
-        # filter = (x >= x0) & (x <= x1)
-        # x_train_subdomain = x[filter].view(-1, 1).requires_grad_(True)
-
-        tam = max(int(round(abs(x1 - x0) * 100, 0)), 41)
+    for carga in trechos_cargas:
+            
+        tam = max(int(round(abs(carga['x1'] - carga['x0']) * 100, 0)), 21)
 
         torch.manual_seed(1)
         min_val = 0
         max_val = 1
         x_scaled = min_val + (max_val - min_val) * torch.rand(tam, 1)
-        x_train_subdomain = x_scaled.requires_grad_(True)
 
-        if x_train_subdomain.numel() > 0:
-            loss_pde += physics_loss(model, x_train_subdomain, qy)
-        if x0 != min([carga['x0'] for carga in trechos_cargas]):
-            loss_int += interface_loss(model, x0)
+        carga['vetor_x'] = x_scaled.requires_grad_(True)
+        carga["u_ref"] = carga['qy'] * carga['L'] ** 4 / (carga['EI'])
 
-    return loss_pde, loss_int
 
-def boundary_loss(model, dados_apoios):
-    loss_bc = 0.0
-    for k, dict_apoio in enumerate(dados_apoios):
+    return trechos_cargas
 
-        x0 = torch.tensor([[dict_apoio['x']]], requires_grad=True)
+class FormaFraca:
 
-        u_0 = model(x0)
+    def u(self, model, x):
+         return model(x)
 
-        u0_x = torch.autograd.grad(u_0, x0, torch.ones_like(u_0), create_graph=True)[0]
-        u0_xx = torch.autograd.grad(u0_x, x0, torch.ones_like(u0_x), create_graph=True)[0]
-        u0_xxx = torch.autograd.grad(u0_xx, x0, torch.ones_like(u0_xx), create_graph=True)[0]
+    def physics_loss_trecho(self, x, u, q):
+       
+        u_x = torch.autograd.grad(u, x, torch.ones_like(u), create_graph=True)[0]
+        u_xx = torch.autograd.grad(u_x, x, torch.ones_like(u_x), create_graph=True)[0]
+        u_xxx = torch.autograd.grad(u_xx, x, torch.ones_like(u_xx), create_graph=True)[0]
+        u_xxxx = torch.autograd.grad(u_xxx, x, torch.ones_like(u_xxx), create_graph=True)[0]
+        
+        f = u_xxxx - q
 
-        if dict_apoio['graus'][1] == 1:
-            loss_bc += (u_0)**2
+        return torch.mean((f) ** 2)
+
+    def physics_loss(self, model, trechos_cargas, qy_max):
+
+        loss_pde = 0
+
+        for k, carga in enumerate(trechos_cargas):
+
+            qy = carga['qy'] / qy_max
+            x = carga['vetor_x']
+ 
+            u = model(x)
+            u_local = u[:, k:k+1]
+
+            loss_pde += self.physics_loss_trecho(x, u_local, qy)
+
+        return loss_pde
+    
+    def boundary_loss_apoio(self, u, x, apoio):
+
+        variacao_loss_bc = 0
+
+        u0_x = torch.autograd.grad(u, x, torch.ones_like(u), create_graph=True)[0]
+        u0_xx = torch.autograd.grad(u0_x, x, torch.ones_like(u0_x), create_graph=True)[0]
+        u0_xxx = torch.autograd.grad(u0_xx, x, torch.ones_like(u0_xx), create_graph=True)[0]
+
+        if apoio.graus[1] == 1:
+            variacao_loss_bc += (u)**2
         else:
-            loss_bc += (u0_xxx)**2
+            variacao_loss_bc += (u0_xxx)**2
 
-        if dict_apoio['graus'][2] == 1: 
-            loss_bc += (u0_x)**2
+        if apoio.graus[2] == 1: 
+            variacao_loss_bc += (u0_x)**2
         else:
-            loss_bc += (u0_xx)**2
+            if apoio.tipo == "ext":
+                variacao_loss_bc += (u0_xx)**2
+            else:
+                pass
 
-    return loss_bc.mean()
+        return variacao_loss_bc
+    
+    def boundary_loss(self, model, lista_apoios):
+        loss_bc = 0.0
+        for apoio in lista_apoios:
 
-class PINNViga(nn.Module):
-    def __init__(self):
-        super(PINNViga, self).__init__()
-        self.net = nn.Sequential(
-            nn.Linear(1, 64),
-            nn.Tanh(),
-            nn.Linear(64, 64),
-            nn.Tanh(),
-            nn.Linear(64, 64),
-            nn.Tanh(),
-            nn.Linear(64, 1)
-        )
+            if apoio.trecho_esq is not None:
+
+                x = torch.tensor([[1.0]], requires_grad=True)
+                u_esq = model(x)[:, apoio.trecho_esq : apoio.trecho_esq + 1]
+                loss_bc += self.boundary_loss_apoio(u_esq, x, apoio)
+
+            if apoio.trecho_dir is not None:
+
+                x = torch.tensor([[0.0]], requires_grad=True)
+                u_dir = model(x)[:, apoio.trecho_dir : apoio.trecho_dir + 1]
+                loss_bc += self.boundary_loss_apoio(u_dir, x, apoio)
+
+        return loss_bc
+
+    def interface_loss_apoio(self, u_esq, u_dir, x_esq, x_dir, graus):
+
+        loss_cont = 0
+
+        u1_esq = torch.autograd.grad(u_esq, x_esq, torch.ones_like(u_esq), create_graph=True)[0]
+        u2_esq = torch.autograd.grad(u1_esq, x_esq, torch.ones_like(u1_esq), create_graph=True)[0]
+
+        u1_dir = torch.autograd.grad(u_dir, x_dir, torch.ones_like(u_dir), create_graph=True)[0]
+        u2_dir = torch.autograd.grad(u1_dir, x_dir, torch.ones_like(u1_dir), create_graph=True)[0]
+
+        loss_cont += (u_esq - u_dir)**2
+        loss_cont += (u1_esq - u1_dir)**2
+        loss_cont += (u2_esq - u2_dir)**2
+
+        return loss_cont
+
+    def interface_loss(self, model, lista_apoios):
+        loss_int = 0.0
+        for apoio in lista_apoios:
+
+            if apoio.tipo == 'int':
+
+                x_esq = torch.tensor([[1.0]], requires_grad=True)
+                u_esq = model(x_esq)[:, apoio.trecho_esq:apoio.trecho_esq + 1]
+                x_dir = torch.tensor([[0.0]], requires_grad=True)
+                u_dir = model(x_dir)[:, apoio.trecho_dir:apoio.trecho_dir + 1]
+                loss_int += self.interface_loss_apoio(u_esq, u_dir, x_esq, x_dir, apoio.graus)
+   
+        if torch.is_tensor(loss_int):
+            return loss_int.mean()
+        else:
+            return torch.tensor(0.0, requires_grad=True)
+
+class PINN(nn.Module):
+    def __init__(self, num_outputs=1, width=32, depth=3):
+        super().__init__()
+        layers = [nn.Linear(1, width), nn.Tanh()]
+        for _ in range(depth-1):
+            layers.append(nn.Linear(width, width))
+            layers.append(nn.Tanh())
+
+        layers.append(nn.Linear(width, num_outputs))
+        self.net = nn.Sequential(*layers)
 
     def forward(self, x):
         return self.net(x)
-    
-    def tratar_apoios(self, lista_apoios):
-        valores_x = []
-        for apoio in lista_apoios:
-            valores_x.append(apoio.x)
 
-        x0 = min(valores_x)
-        xf = max(valores_x)
+class PINNViga:
+    def __init__(self, lista_apoios, lista_cargas, E, I,
+                 formulacao = "fraca", width = 32, depth = 3):
 
-        L = xf - x0
+        self.lista_apoios = lista_apoios
+        self.lista_cargas = lista_cargas
+        self.EI = E * I
 
-        dados_apoios = []
+        self.trechos_cargas = obter_trechos_cargas(self.lista_apoios, self.lista_cargas, self.EI)
+        num_camadas_output = len(self.trechos_cargas)
 
-        for apoio in lista_apoios:
-            x_norm = (apoio.x - x0) / L
-            dict_temp = {
-                "x" : x_norm,
-                "graus" : apoio.graus
-            }
-            dados_apoios.append(dict_temp)
+        self.qy_max = max([abs(carga['qy']) for carga in self.trechos_cargas])
+        self.L_total = sum([carga['L'] for carga in self.trechos_cargas])
 
-        return float(L), dados_apoios
-    
-    # def ver_apoios():
-
-
-    # def closure():
-    #     optimizer.zero_grad()
-
-    def run_model(self, lista_apoios, lista_cargas, EI, 
-                  num_epochs=5000, pde_weight=1.0, bc_weight=1.0,
-                  tol=1e-5, tol_apoio = 1e-5, tam=101):
+        if formulacao == 'fraca':
+            self.formulacao = FormaFraca()
+        else:
+            raise NotImplementedError("Somente 'fraca' implementado nesta versão.")
         
-        L, dados_apoios = self.tratar_apoios(lista_apoios)
-
-        set_seed(1)
-
-        self.model = PINNViga()
+        self.model = PINN(num_outputs=num_camadas_output, width=width, depth = depth)
+    
+    def run_model(self, num_epochs=5000, pde_weight=1.0, bc_weight=1.0, int_weight = 1.0,
+                  tol=1e-5, tol_apoio = 1e-5, tam=51):
+        
         optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
         self.u_plot_variation = []
         self.loss_pde_variation = []
         self.loss_bc_variation = []
         self.loss_int_variation = []
 
-        self.trechos_cargas = obter_trechos_cargas(lista_apoios, lista_cargas)
-        max_qy = max_qy = max([abs(carga['qy']) for carga in self.trechos_cargas])
-
-        u_ref = max_qy * (L**4) / EI
-
         for epoch in range(num_epochs + 1):
-
-            # if epoch >= max([0.3 * num_epochs, 350]):
-            #     optimizer = torch.optim.LBFGS(self.model.parameters(), lr=0.001, max_iter=int(round(0.7 * num_epochs,0)))
-
             optimizer.zero_grad()
 
-            loss_pde, loss_int = trecho_physics_loss(self.model, self.trechos_cargas)
-            loss_bc = boundary_loss(self.model, dados_apoios)
-
-            loss = pde_weight * loss_pde + bc_weight * loss_bc + loss_int
+            loss_pde = self.formulacao.physics_loss(self.model, self.trechos_cargas, self.qy_max)
+            loss_bc = self.formulacao.boundary_loss(self.model, self.lista_apoios)
+            loss_int = self.formulacao.interface_loss(self.model, self.lista_apoios)
+        
+            loss = pde_weight * loss_pde + bc_weight * loss_bc + int_weight * loss_int
 
             loss.backward()            
             optimizer.step()
 
             if (float(loss_bc) <= tol) and (float(loss_pde) <= tol):
                 print("Treinamento concluído pelo critério de tolerância da perda")
-                print(f"Epoch {epoch}, Loss: {loss.item():.12f}, PDE Loss: {loss_pde.item():.12f}, BC Loss: {loss_bc.item():.12f}")
+                print(f"Epoch {epoch}, Loss: {loss.item():.12f}, PDE Loss: {loss_pde.item():.12f}, BC Loss: {loss_bc.item():.12f}, INT Loss: {loss_int.item():.12f}")
                 print(f"Treinamento interrompido na época {epoch}.")
                 break
                        
             if epoch % int(num_epochs / 10) == 0:
-                print(f"Epoch {epoch}, Loss: {loss.item():.12f}, PDE Loss: {loss_pde.item():.12f}, BC Loss: {loss_bc.item():.12f}")
+                print(f"Epoch {epoch}, Loss: {loss.item():.12f}, PDE Loss: {loss_pde.item():.12f}, BC Loss: {loss_bc.item():.12f}, INT Loss: {loss_int.item():.12f}")
 
-            x_plot = torch.linspace(0, 1, tam).view(-1,1)
-            u_plot_star = self.model(x_plot).detach().numpy()
-            self.u_plot = u_plot_star * u_ref
-            self.x_plot = (x_plot.numpy() * L)
-            self.u_plot_variation.append((epoch, self.u_plot))
+            # x_plot = torch.linspace(0, 1, tam).view(-1,1)
+            # u_plot_star = self.model(x_plot).detach().numpy()
+            # self.u_plot = u_plot_star
+            # self.x_plot = (x_plot.numpy() * self.L)
+            # self.u_plot_variation.append((epoch, self.u_plot))
             self.loss_pde_variation.append(loss_pde)
             self.loss_bc_variation.append(loss_bc)
             self.loss_int_variation.append(loss_int)
 
-            ver_apoio = 0
-            lista_x = [float(x) for x in self.x_plot]
-            lista_u = [float(u) for u in self.u_plot]
+            # ver_apoio = 0
+            # lista_x = [float(x) for x in self.x_plot]
+            # lista_u = [float(u) for u in self.u_plot]
 
-            for k, apoio in enumerate(lista_apoios):
-                idx = int(lista_x.index(float(apoio.x)))
-                if abs(lista_u[idx]) <= tol_apoio:
-                    ver_apoio += 1
+            # for k, apoio in enumerate(self.lista_apoios):
+            #     idx = int(lista_x.index(float(apoio.x)))
+            #     if abs(lista_u[idx]) <= tol_apoio:
+            #         ver_apoio += 1
 
-            if ver_apoio == len(lista_apoios):
-                print("Treinamento concluído pelo critério do deslocamento nos apoios")
-                print(f"Epoch {epoch}, Loss: {loss.item():.12f}, PDE Loss: {loss_pde.item():.12f}, BC Loss: {loss_bc.item():.12f}")
-                print(f"Treinamento interrompido na época {epoch}.")
-                break
+            # if ver_apoio == len(self.lista_apoios):
+            #     print("Treinamento concluído pelo critério do deslocamento nos apoios")
+            #     print(f"Epoch {epoch}, Loss: {loss.item():.12f}, PDE Loss: {loss_pde.item():.12f}, BC Loss: {loss_bc.item():.12f}")
+            #     print(f"Treinamento interrompido na época {epoch}.")
+            #     break
 
         self.loss = self.loss_pde_variation + self.loss_bc_variation + self.loss_int_variation
 
     def plot_errors(self, scale, nome = "erros.png"):
-        valores_epoch = np.arange(0, len(self.u_plot_variation), 1)
+        valores_epoch = np.arange(0, len(self.loss_bc_variation), 1)
         valores_bc = [float(loss) for loss in self.loss_bc_variation]
         valores_pde = [float(loss) for loss in self.loss_pde_variation]
         valores_int = [float(loss) for loss in self.loss_int_variation]
-        valores_total = [bc + pde for bc, pde, int in zip(valores_bc, valores_pde, valores_int)]
+        valores_total = [bc + pde + int for bc, pde, int in zip(valores_bc, valores_pde, valores_int)]
 
         plt.figure(figsize=(8, 4.5))
         plt.plot(valores_epoch, valores_bc, label = 'Perda CC', color = 'red', lw = 1)
-        plt.plot(valores_epoch, valores_pde, label = 'Perda ED', color = 'blue', lw = 1)
-        plt.plot(valores_epoch, valores_int, label = 'Perda INT', color = 'orange', lw = 1)
+        plt.plot(valores_epoch, valores_pde, label = 'Perda EDO', color = 'blue', lw = 1)
+        plt.plot(valores_epoch, valores_int, label = 'Perda CONT', color = 'orange', lw = 1)
         plt.plot(valores_epoch, valores_total, label = 'Perda Total', color = 'green', lw = 1)
         plt.title("Variação do erro durante o treinamento")
         plt.xlabel('Época')
@@ -275,3 +305,22 @@ class PINNViga(nn.Module):
         plt.ylim(0, 1.05 * max(valores_total) / scale)
         plt.legend()
         plt.savefig(nome, dpi = 300)
+
+    # def plot_deslocamento(self, nome = "deslocamento.png"):
+    #     x_plot = torch.linspace(0, 1, 101).view(-1,1)
+    #     u_plot_star = self.model(x_plot).detach().numpy()
+    #     self.u_plot = u_plot_star
+    #     self.x_plot = (x_plot.numpy() * L)
+
+    #     u_pred = self.model(x_plot).detach().numpy()
+
+    #     for k, trecho in enumerate(self.trechos_cargas):
+
+    #         print(trecho)
+    #         x0 = trecho['x0']
+    #         x1 = trecho['x1']
+    #         u_trecho = u_pred[:, k : k+1]
+    #         x_trecho = np.linspace(x0, x1, len(u_trecho))
+    #         plt.plot(x_trecho, u_trecho, color = 'blue')
+    #         plt.xlabel("Comprimento (m)")
+    #         plt.ylabel("Deslocamento (m)")

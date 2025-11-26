@@ -10,3 +10,8 @@ class Apoio:
 
         self.x = posicao[0]
         self.y = posicao[1]
+
+        self.tipo = None
+
+        self.trecho_esq = None
+        self.trecho_dir = None
