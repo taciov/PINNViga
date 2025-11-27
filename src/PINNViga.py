@@ -1,9 +1,9 @@
-import copy
 import torch
 import torch.nn as nn
 import numpy as np
 import random
 import matplotlib.pyplot as plt
+from anastruct import SystemElements
 
 def set_seed(seed=1):
     random.seed(seed)
@@ -212,6 +212,8 @@ class PINN(nn.Module):
 class PINNViga:
     def __init__(self, lista_apoios, lista_cargas, E, I,
                  formulacao = "fraca", width = 32, depth = 3):
+        
+        self.verif_analitica = False
 
         self.lista_apoios = lista_apoios
         self.lista_cargas = lista_cargas
@@ -231,7 +233,7 @@ class PINNViga:
         self.model = PINN(num_outputs=num_camadas_output, width=width, depth = depth)
     
     def run_model(self, num_epochs=5000, pde_weight=1.0, bc_weight=1.0, int_weight = 1.0,
-                  tol=1e-5, tol_apoio = 1e-5, tam=51):
+                  tol=1e-5, tol_apoio = 1e-5):
         
         optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
         self.u_plot_variation = []
@@ -286,6 +288,51 @@ class PINNViga:
 
         self.loss = self.loss_pde_variation + self.loss_bc_variation + self.loss_int_variation
 
+    def run_sol_analitica(self, tam = 20):
+        sistema = SystemElements(EI = self.EI, EA=1e12)
+
+        for k, trecho in enumerate(self.trechos_cargas):
+            x0 = trecho['x0']
+            x1 = trecho['x1']
+            dx = (x1 - x0) / tam
+
+            for i in range(tam):
+                sistema.add_element([[x0 + i*dx,0], [x0 + (i+1) * dx,0]])
+                sistema.q_load(q = trecho['qy'], element_id = sistema.id_last_element, direction = 'element')
+
+        lista_ids_apoios = [1 + k * tam for k in range(len(self.trechos_cargas) + 1)]
+
+        for id_atual, apoio in zip(lista_ids_apoios, self.lista_apoios):
+            if apoio.graus == [1, 1, 0]:
+                sistema.add_support_hinged(node_id=id_atual)
+            elif apoio.graus == [0, 1, 0]:
+                sistema.add_support_roll(node_id = id_atual)
+            elif apoio.graus == [1, 1, 1]:
+                sistema.add_support_fixed(node_id = id_atual)
+
+        sistema.solve()
+
+        self.x_analitico = [vars(list(sistema._vertices.keys())[k])['coordinates'][0] for k in range(len(vars(sistema)['_vertices']))]
+        self.x_analitico2 = []
+        for k in range(len(self.x_analitico) - 1):
+            self.x_analitico2.append([self.x_analitico[k + 1], self.x_analitico[k]])
+        self.uy_analitico = [float(- sistema.get_node_results_system()[id]['uy']) for id in range(len(sistema.get_node_results_system()))]
+        self.rz_analitico = [float(sistema.get_node_results_system()[id]['phi_z']) for id in range(len(sistema.get_node_results_system()))]
+        self.fy_analitico = [float(sistema.get_node_results_system()[id]['Fy']) for id in range(len(sistema.get_node_results_system()))]
+        self.fy_analitico = []
+        for k, barra in enumerate(sistema.get_element_results()):
+            self.fy_analitico.append([float(-barra['Qmax']), float(-barra['Qmin'])])
+        self.mf_analitico = []
+        for k, barra in enumerate(sistema.get_element_results()):
+            self.mf_analitico.append([float(-barra['Mmin']), float(-barra['Mmax'])])
+
+        for k in range(1, len(self.mf_analitico)):
+            if round(self.mf_analitico[k][1], 2) != round(self.mf_analitico[k - 1][0], 2):
+                temp = [self.mf_analitico[k][1], self.mf_analitico[k][0]]
+                self.mf_analitico[k] = temp
+
+        self.verif_analitica = True
+
     def plot_errors(self, scale, nome = "erros.png"):
         valores_epoch = np.arange(0, len(self.loss_bc_variation), 1)
         valores_bc = [float(loss) for loss in self.loss_bc_variation]
@@ -306,21 +353,139 @@ class PINNViga:
         plt.legend()
         plt.savefig(nome, dpi = 300)
 
-    # def plot_deslocamento(self, nome = "deslocamento.png"):
-    #     x_plot = torch.linspace(0, 1, 101).view(-1,1)
-    #     u_plot_star = self.model(x_plot).detach().numpy()
-    #     self.u_plot = u_plot_star
-    #     self.x_plot = (x_plot.numpy() * L)
+    def plot_deslocamento(self, plot_analitico = True, nome = "deslocamento.png"):
+        x_plot = torch.linspace(0, 1, 101).view(-1,1)
+        u_plot_star = self.model(x_plot).detach().numpy()
+        self.u_plot = u_plot_star
 
-    #     u_pred = self.model(x_plot).detach().numpy()
+        u_pred = self.model(x_plot).detach().numpy()
+        plt.figure(figsize=(7.5,4.5))
 
-    #     for k, trecho in enumerate(self.trechos_cargas):
+        for k, trecho in enumerate(self.trechos_cargas):
+            x0 = trecho['x0']
+            x1 = trecho['x1']
+            u_trecho = u_pred[:, k : k+1] * trecho['u_ref'] * (-1)
+            x_trecho = np.linspace(x0, x1, len(u_trecho))
+            if k == 0:
+                plt.plot(x_trecho, u_trecho, color = 'blue', label = "Solução PINN")
 
-    #         print(trecho)
-    #         x0 = trecho['x0']
-    #         x1 = trecho['x1']
-    #         u_trecho = u_pred[:, k : k+1]
-    #         x_trecho = np.linspace(x0, x1, len(u_trecho))
-    #         plt.plot(x_trecho, u_trecho, color = 'blue')
-    #         plt.xlabel("Comprimento (m)")
-    #         plt.ylabel("Deslocamento (m)")
+            else:
+                plt.plot(x_trecho, u_trecho, color = 'blue')
+
+        if plot_analitico is True:
+            if self.verif_analitica is False:
+                self.run_sol_analitica()
+            plt.plot(self.x_analitico, self.uy_analitico, color = 'red', label = "Solução analítica", ls = '--')
+        plt.xlabel("Comprimento (m)")
+        plt.ylabel("Deslocamento (m)")
+        plt.legend()
+        plt.savefig(nome, dpi = 300)
+
+    def plot_rotacao(self, plot_analitico = True, nome="rotacao.png"):
+        x_plot = torch.linspace(0, 1, 101).view(-1,1)
+        plt.figure(figsize=(7.5,4.5))
+
+        for k, trecho in enumerate(self.trechos_cargas):
+
+            x = x_plot.clone().requires_grad_(True)
+            u = self.model(x)[:, k:k+1]
+
+            u1 = torch.autograd.grad(u, x, torch.ones_like(u), create_graph=True)[0]  # rotação
+
+            theta_ref = trecho['qy'] * trecho['L'] ** 3 / trecho['EI']
+
+            theta = theta_ref * (u1).detach().numpy()
+            xx = np.linspace(trecho['x0'], trecho['x1'], len(theta))
+
+            if k == 0:
+                plt.plot(xx, theta, color="green", label="Solução PINN")
+            else:
+                plt.plot(xx, theta, color="green")
+
+        if plot_analitico is True:
+            if self.verif_analitica is False:
+                self.run_sol_analitica()
+            plt.plot(self.x_analitico, self.rz_analitico, color = 'red', label = "Solução analítica", ls = '--')
+        plt.title("Rotação")
+        plt.xlabel("Comprimento (m)")
+        plt.ylabel("Rotação (rad)")
+        plt.legend()
+        plt.savefig(nome, dpi=300)
+
+    def plot_momento(self, plot_analitico = True, nome="momento.png"):
+        x_plot = torch.linspace(0, 1, 101).view(-1,1)
+        plt.figure(figsize=(7.5,4.5))
+
+        for k, trecho in enumerate(self.trechos_cargas):
+
+            x = x_plot.clone().requires_grad_(True)
+            u = self.model(x)[:, k:k+1]
+
+            u1 = torch.autograd.grad(u, x, torch.ones_like(u), create_graph=True)[0]
+            u2 = torch.autograd.grad(u1, x, torch.ones_like(u1), create_graph=True)[0]
+
+            m_ref = trecho['qy'] * trecho['L'] ** 2
+
+            M = - m_ref * (u2).detach().numpy()  # ← convencional em viga Euler-Bernoulli
+            xx = np.linspace(trecho['x0'], trecho['x1'], len(M))
+
+            if k == 0:
+                plt.plot(xx, M, color="blue", label="Solução PINN")
+            else:
+                plt.plot(xx, M, color="blue")
+
+        if plot_analitico is True:
+            if self.verif_analitica is False:
+                self.run_sol_analitica()
+            for k, (x, M) in enumerate(zip(self.x_analitico2, self.mf_analitico)):
+                if k == 0:
+                    plt.plot(x, M, color = 'red', label = "Solução analítica", ls = '--')
+                else:
+                    plt.plot(x, M, color = 'red', ls = '--')
+
+        plt.title("Momento Fletor")
+        plt.xlabel("Comprimento (m)")
+        plt.ylabel("Momento Fletor (N.m)")
+        plt.legend()
+        plt.gca().invert_yaxis()
+        plt.savefig(nome, dpi=300)
+
+    def plot_cortante(self, plot_analitico = True, nome="cortante.png"):
+        x_plot = torch.linspace(0, 1, 101).view(-1,1)
+        plt.figure(figsize=(7.5,4.5))
+
+        for k, trecho in enumerate(self.trechos_cargas):
+
+            x = x_plot.clone().requires_grad_(True)
+            u = self.model(x)[:, k:k+1]
+
+            u1 = torch.autograd.grad(u, x, torch.ones_like(u), create_graph=True)[0]
+            u2 = torch.autograd.grad(u1, x, torch.ones_like(u1), create_graph=True)[0]
+            u3 = torch.autograd.grad(u2, x, torch.ones_like(u2), create_graph=True)[0]
+
+            v_ref = trecho['qy'] * trecho['L']
+
+            V = - v_ref * (u3).detach().numpy()  # sinal direto — manteve padrão clássico
+            xx = np.linspace(trecho['x0'], trecho['x1'], len(V))
+
+            if k == 0:
+                plt.plot(xx, V, color="blue", label="Solução PINN")
+            else:
+                plt.plot(xx, V, color="blue")
+
+        if plot_analitico is True:
+            if self.verif_analitica is False:
+                self.run_sol_analitica()
+            for k, (x, Q) in enumerate(zip(self.x_analitico2, self.fy_analitico)):
+                if k == 0:
+                    plt.plot(x, Q, color = 'red', label = "Solução analítica", ls = '--')
+                else:
+                    plt.plot(x, Q, color = 'red', ls = '--')
+
+        plt.title("Esforço Cortante")
+        plt.xlabel("Comprimento (m)")
+        plt.ylabel("Esforço Cortante (N)")
+        plt.legend()
+        plt.savefig(nome, dpi=300)
+
+
