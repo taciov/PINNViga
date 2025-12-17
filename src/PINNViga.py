@@ -211,9 +211,11 @@ class PINN(nn.Module):
 
 class PINNViga:
     def __init__(self, lista_apoios, lista_cargas, E, I,
-                 formulacao = "fraca", width = 32, depth = 3):
+                 formulacao = "fraca", otimizador = "adam", lr_adam = 0.001, width = 32, depth = 3):
         
         self.verif_analitica = False
+        self.otimizador = otimizador
+        self.lr_adam = lr_adam
 
         self.lista_apoios = lista_apoios
         self.lista_cargas = lista_cargas
@@ -231,42 +233,82 @@ class PINNViga:
             raise NotImplementedError("Somente 'fraca' implementado nesta versão.")
         
         self.model = PINN(num_outputs=num_camadas_output, width=width, depth = depth)
+
+    def calc_loss(self, pde_weight, bc_weight, int_weight):
+        loss_pde = self.formulacao.physics_loss(self.model, self.trechos_cargas, self.qy_max)
+        loss_bc = self.formulacao.boundary_loss(self.model, self.lista_apoios)
+        loss_int = self.formulacao.interface_loss(self.model, self.lista_apoios)
+    
+        loss = pde_weight * loss_pde + bc_weight * loss_bc + int_weight * loss_int
+
+        return loss, loss_pde, loss_bc, loss_int
+    
+    def adam_step(self, optimizer, pde_weight, bc_weight, int_weight):
+        optimizer.zero_grad()
+
+        loss, loss_pde, loss_bc, loss_int = self.calc_loss(pde_weight, bc_weight, int_weight)
+
+        loss.backward()
+        optimizer.step()
+
+        return loss, loss_pde, loss_bc, loss_int
+    
+    def lbfgs_step(self, optimizer, pde_weight, bc_weight, int_weight):
+
+        def closure():
+            optimizer.zero_grad()
+            loss, _, _, _ = self.calc_loss(pde_weight, bc_weight, int_weight)
+            loss.backward()
+            return loss
+
+        loss = optimizer.step(closure)
+
+        loss, loss_pde, loss_bc, loss_int = self.calc_loss(pde_weight, bc_weight, int_weight)
+
+        return loss, loss_pde, loss_bc, loss_int
     
     def run_model(self, num_epochs=5000, pde_weight=1.0, bc_weight=1.0, int_weight = 1.0,
-                  tol=1e-5, tol_apoio = 1e-5):
+                  tol=1e-5, tol_apoio = 1e-5, print_progresso = True):
         
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
         self.u_plot_variation = []
         self.loss_pde_variation = []
         self.loss_bc_variation = []
         self.loss_int_variation = []
 
+        if self.otimizador == "adam":
+            optimizer = torch.optim.Adam(self.model.parameters(), lr = self.lr_adam)
+            step_fn = self.adam_step
+
+        elif self.otimizador == "lbfgs":
+            optimizer = torch.optim.LBFGS(
+            self.model.parameters(),
+            lr=1.0,
+            max_iter=20,
+            history_size=100,
+            line_search_fn="strong_wolfe"
+        )
+            step_fn = self.lbfgs_step
+
+        else:
+            raise ValueError("otimizador deve ser 'adam' ou 'lbfgs'" )
+
         for epoch in range(num_epochs + 1):
-            optimizer.zero_grad()
 
-            loss_pde = self.formulacao.physics_loss(self.model, self.trechos_cargas, self.qy_max)
-            loss_bc = self.formulacao.boundary_loss(self.model, self.lista_apoios)
-            loss_int = self.formulacao.interface_loss(self.model, self.lista_apoios)
-        
-            loss = pde_weight * loss_pde + bc_weight * loss_bc + int_weight * loss_int
-
-            loss.backward()            
-            optimizer.step()
+            loss, loss_pde, loss_bc, loss_int = step_fn(optimizer, pde_weight, bc_weight, int_weight)
 
             if (float(loss_bc) <= tol) and (float(loss_pde) <= tol):
                 print("Treinamento concluído pelo critério de tolerância da perda")
                 print(f"Epoch {epoch}, Loss: {loss.item():.12f}, PDE Loss: {loss_pde.item():.12f}, BC Loss: {loss_bc.item():.12f}, INT Loss: {loss_int.item():.12f}")
                 print(f"Treinamento interrompido na época {epoch}.")
                 break
-                       
-            if epoch % int(num_epochs / 10) == 0:
-                print(f"Epoch {epoch}, Loss: {loss.item():.12f}, PDE Loss: {loss_pde.item():.12f}, BC Loss: {loss_bc.item():.12f}, INT Loss: {loss_int.item():.12f}")
 
-            # x_plot = torch.linspace(0, 1, tam).view(-1,1)
-            # u_plot_star = self.model(x_plot).detach().numpy()
-            # self.u_plot = u_plot_star
-            # self.x_plot = (x_plot.numpy() * self.L)
-            # self.u_plot_variation.append((epoch, self.u_plot))
+            if print_progresso is False:
+                pass
+            else:
+                denominador = 10 if num_epochs >= 10 else 2
+                if epoch % int(num_epochs / denominador) == 0:
+                    print(f"Epoch {epoch}, Loss: {loss.item():.12f}, PDE Loss: {loss_pde.item():.12f}, BC Loss: {loss_bc.item():.12f}, INT Loss: {loss_int.item():.12f}")
+
             self.loss_pde_variation.append(loss_pde)
             self.loss_bc_variation.append(loss_bc)
             self.loss_int_variation.append(loss_int)
@@ -333,6 +375,41 @@ class PINNViga:
 
         self.verif_analitica = True
 
+    def save_values(self):
+        x_plot = torch.linspace(0, 1, 101).view(-1,1)
+        u_plot_star = self.model(x_plot).detach().numpy()
+        self.u_plot = u_plot_star
+
+        u_pred = self.model(x_plot).detach().numpy()
+        plt.figure(figsize=(7.5,4.5))
+
+        for k, trecho in enumerate(self.trechos_cargas):
+            x0 = trecho['x0']
+            x1 = trecho['x1']
+            u_trecho = u_pred[:, k : k+1] * trecho['u_ref'] * (-1)
+            x_trecho = np.linspace(x0, x1, len(u_trecho))
+            trecho['valores_x'] = x_trecho
+            trecho['valores_u'] = u_trecho
+
+            x = x_plot.clone().requires_grad_(True)
+            u = self.model(x)[:, k:k+1]
+            u1 = torch.autograd.grad(u, x, torch.ones_like(u), create_graph=True)[0]
+            u2 = torch.autograd.grad(u1, x, torch.ones_like(u1), create_graph=True)[0]
+            u3 = torch.autograd.grad(u2, x, torch.ones_like(u2), create_graph=True)[0]
+
+            theta_ref = trecho['qy'] * trecho['L'] ** 3 / trecho['EI']
+            theta = theta_ref * (u1).detach().numpy()
+            trecho['valores_theta'] = theta
+
+            m_ref = trecho['qy'] * trecho['L'] ** 2
+            M = - m_ref * (u2).detach().numpy()
+            trecho['valores_mf'] = M
+
+            v_ref = trecho['qy'] * trecho['L']
+            V = - v_ref * (u3).detach().numpy()
+            trecho['valores_V'] = V
+
+
     def plot_errors(self, scale, nome = "erros.png"):
         valores_epoch = np.arange(0, len(self.loss_bc_variation), 1)
         valores_bc = [float(loss) for loss in self.loss_bc_variation]
@@ -366,6 +443,8 @@ class PINNViga:
             x1 = trecho['x1']
             u_trecho = u_pred[:, k : k+1] * trecho['u_ref'] * (-1)
             x_trecho = np.linspace(x0, x1, len(u_trecho))
+            trecho['valores_x'] = x_trecho
+            trecho['valores_u'] = u_trecho
             if k == 0:
                 plt.plot(x_trecho, u_trecho, color = 'blue', label = "Solução PINN")
 
@@ -378,6 +457,7 @@ class PINNViga:
             plt.plot(self.x_analitico, self.uy_analitico, color = 'red', label = "Solução analítica", ls = '--')
         plt.xlabel("Comprimento (m)")
         plt.ylabel("Deslocamento (m)")
+        plt.title("Linha Elástica")
         plt.legend()
         plt.savefig(nome, dpi = 300)
 
@@ -397,10 +477,13 @@ class PINNViga:
             theta = theta_ref * (u1).detach().numpy()
             xx = np.linspace(trecho['x0'], trecho['x1'], len(theta))
 
+            trecho['valores_x'] = xx
+            trecho['valores_theta'] = theta
+
             if k == 0:
-                plt.plot(xx, theta, color="green", label="Solução PINN")
+                plt.plot(xx, theta, color="blue", label="Solução PINN")
             else:
-                plt.plot(xx, theta, color="green")
+                plt.plot(xx, theta, color="blue")
 
         if plot_analitico is True:
             if self.verif_analitica is False:
@@ -426,8 +509,11 @@ class PINNViga:
 
             m_ref = trecho['qy'] * trecho['L'] ** 2
 
-            M = - m_ref * (u2).detach().numpy()  # ← convencional em viga Euler-Bernoulli
+            M = - m_ref * (u2).detach().numpy()
             xx = np.linspace(trecho['x0'], trecho['x1'], len(M))
+
+            trecho['valores_x'] = xx
+            trecho['valores_mf'] = M
 
             if k == 0:
                 plt.plot(xx, M, color="blue", label="Solução PINN")
@@ -467,6 +553,9 @@ class PINNViga:
 
             V = - v_ref * (u3).detach().numpy()  # sinal direto — manteve padrão clássico
             xx = np.linspace(trecho['x0'], trecho['x1'], len(V))
+
+            trecho['valores_x'] = xx
+            trecho['valores_V'] = V
 
             if k == 0:
                 plt.plot(xx, V, color="blue", label="Solução PINN")
