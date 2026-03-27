@@ -75,7 +75,7 @@ def obter_trechos_cargas(lista_apoios, lista_cargas, EI):
 
     for carga in trechos_cargas:
             
-        tam = max(int(round(abs(carga['x1'] - carga['x0']) * 100, 0)), 21)
+        tam = max(int(round(abs(carga['x1'] - carga['x0']) * 10, 0)), 11)
 
         torch.manual_seed(1)
         min_val = 0
@@ -92,6 +92,12 @@ class FormaFraca:
 
     def u(self, model, x):
          return model(x)
+    
+    def estabilizacao_loss(self, x, u): ## TESTE
+        u_x = torch.autograd.grad(u, x, torch.ones_like(u), create_graph=True)[0]
+        u_xx = torch.autograd.grad(u_x, x, torch.ones_like(u_x), create_graph=True)[0]
+
+        return torch.mean(u_xx ** 2)
 
     def physics_loss_trecho(self, x, u, q):
        
@@ -118,6 +124,10 @@ class FormaFraca:
 
             loss_pde += self.physics_loss_trecho(x, u_local, qy)
 
+            # if (carga['apoio0'].graus == [0, 0, 0] and carga['apoio0'].tipo == 'int') or (carga['apoio1'].graus == [0, 0, 0] and carga['apoio1'].tipo == 'int'): ## TESTE
+                
+            #     loss_pde += self.estabilizacao_loss(x, u_local)
+
         return loss_pde
     
     def boundary_loss_apoio(self, u, x, apoio):
@@ -131,7 +141,10 @@ class FormaFraca:
         if apoio.graus[1] == 1:
             variacao_loss_bc += (u)**2
         else:
-            variacao_loss_bc += (u0_xxx)**2
+            if apoio.tipo == 'ext':
+                variacao_loss_bc += (u0_xxx)**2
+            else:
+                pass
 
         if apoio.graus[2] == 1: 
             variacao_loss_bc += (u0_x)**2
@@ -161,19 +174,24 @@ class FormaFraca:
 
         return loss_bc
 
-    def interface_loss_apoio(self, u_esq, u_dir, x_esq, x_dir, graus):
+    def interface_loss_apoio(self, u_esq, u_dir, x_esq, x_dir, apoio):
 
         loss_cont = 0
 
         u1_esq = torch.autograd.grad(u_esq, x_esq, torch.ones_like(u_esq), create_graph=True)[0]
         u2_esq = torch.autograd.grad(u1_esq, x_esq, torch.ones_like(u1_esq), create_graph=True)[0]
+        u3_esq = torch.autograd.grad(u2_esq, x_esq, torch.ones_like(u2_esq), create_graph=True)[0]
 
         u1_dir = torch.autograd.grad(u_dir, x_dir, torch.ones_like(u_dir), create_graph=True)[0]
         u2_dir = torch.autograd.grad(u1_dir, x_dir, torch.ones_like(u1_dir), create_graph=True)[0]
+        u3_dir = torch.autograd.grad(u2_dir, x_dir, torch.ones_like(u2_dir), create_graph=True)[0]
 
         loss_cont += (u_esq - u_dir)**2
         loss_cont += (u1_esq - u1_dir)**2
-        loss_cont += (u2_esq - u2_dir)**2
+        if apoio.graus[2] == 0:
+            loss_cont += (u2_esq - u2_dir)**2
+        if apoio.graus[1] == 0:
+            loss_cont += (u3_esq - u3_dir)**2
 
         return loss_cont
 
@@ -187,7 +205,7 @@ class FormaFraca:
                 u_esq = model(x_esq)[:, apoio.trecho_esq:apoio.trecho_esq + 1]
                 x_dir = torch.tensor([[0.0]], requires_grad=True)
                 u_dir = model(x_dir)[:, apoio.trecho_dir:apoio.trecho_dir + 1]
-                loss_int += self.interface_loss_apoio(u_esq, u_dir, x_esq, x_dir, apoio.graus)
+                loss_int += self.interface_loss_apoio(u_esq, u_dir, x_esq, x_dir, apoio)
    
         if torch.is_tensor(loss_int):
             return loss_int.mean()
