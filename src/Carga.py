@@ -13,17 +13,17 @@ class CargaPontual:
         self.y = apoio.y
         apoio.lista_cargas.append(self)
 
-    def atribuir_propriedades_do_trecho(self, trechos_cargas):
-        if (self.apoio.trecho_esq is None) or (self.apoio.trecho_dir is None):
-            if self.apoio.trecho_esq is None:
-                self.EI = trechos_cargas[self.apoio.trecho_dir]['EI']
-                self.L = trechos_cargas[self.apoio.trecho_dir]['L']
-            else:
-                self.EI = trechos_cargas[self.apoio.trecho_esq]['EI']
-                self.L = trechos_cargas[self.apoio.trecho_esq]['L']
-        else:
-            self.EI = max(trechos_cargas[self.apoio.trecho_esq]['EI'], trechos_cargas[self.apoio.trecho_dir]['EI'])
-            self.L = max(trechos_cargas[self.apoio.trecho_esq]['L'], trechos_cargas[self.apoio.trecho_dir]['L'])      
+class CargaMomento:
+    tipo = "momento"
+    def __init__(self, vetor, apoio):
+        self.fx = vetor[0]
+        self.fy = vetor[1]
+        self.mz = vetor[2]
+
+        self.apoio = apoio
+        self.x = apoio.x
+        self.y = apoio.y
+        apoio.lista_cargas.append(self)   
 
 class CargaDistribuida:
     tipo = "distribuida"

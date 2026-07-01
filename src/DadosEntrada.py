@@ -1,18 +1,5 @@
 import torch
-# import torch.nn as nn
 import numpy as np
-import random
-# import copy
-# from src import Output
-
-def set_seed(seed=1):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
 
 def inserir_apoios_no_trecho(lista_apoios, trechos_cargas):
     for k, trecho in enumerate(trechos_cargas):
@@ -48,6 +35,9 @@ def obter_trechos_cargas(lista_apoios, lista_cargas, EI, filtro):
         elif carga.tipo == 'pontual':
             if carga.x not in posicoes_x:
                 posicoes_x.append(carga.x)
+        elif carga.tipo == 'momento':
+            if carga.x not in posicoes_x:
+                posicoes_x.append(carga.x)
 
     for apoio in lista_apoios:
         if apoio.x not in posicoes_x:
@@ -81,7 +71,6 @@ def obter_trechos_cargas(lista_apoios, lista_cargas, EI, filtro):
             
         tam = max(int(round(abs(carga['x1'] - carga['x0']) * 10, 0)), 21)
 
-        torch.manual_seed(1)
         min_val = 0
         max_val = 1
         x_scaled = min_val + (max_val - min_val) * torch.rand(tam, 1)
@@ -106,6 +95,21 @@ def obter_trechos_cargas(lista_apoios, lista_cargas, EI, filtro):
         carga['theta_ref_pontual'] = carga['fy'] * carga['L'] ** 2 / carga['EI']
         carga['m_ref_pontual'] = carga['fy'] * carga['L']
         carga['v_ref_pontual'] = carga['fy']
+
+        if filtro in [None, 'momento']:
+            lista_cargas_trecho = (carga['apoio0'].lista_cargas + carga['apoio1'].lista_cargas)
+            if len(lista_cargas_trecho) > 0:
+                lista_mz = [carga.mz for carga in lista_cargas_trecho]
+                carga['mz'] = sum(lista_mz)
+            else:
+                carga['mz'] = 0
+        else:
+            carga['mz'] = 0
+
+        carga['u_ref_momento'] = - carga['mz'] * carga['L'] ** 2 / carga['EI']
+        carga['theta_ref_momento'] = - carga['mz'] * carga['L'] / carga['EI']
+        carga['m_ref_momento'] = - carga['mz']
+        carga['v_ref_momento'] = - carga['mz'] / carga['L']
 
         carga['tam'] = tam
 
