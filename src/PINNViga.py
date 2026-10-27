@@ -98,8 +98,10 @@ class PINNViga:
 
     def calc_loss(self, pde_weight, bc_weight, int_weight, jump_weight, input_model, input_trechos_cargas, key):
         loss_pde = self.formulacao.physics_loss(input_model, input_trechos_cargas, self.qy_max)
-        loss_bc = self.formulacao.boundary_loss(input_model, self.lista_apoios)
-        loss_int, loss_jump = self.formulacao.interface_loss(input_model, self.lista_apoios, self.fy_max, self.mz_max, key)
+        # Os pontos de apoio são avaliados uma vez e compartilhados entre as perdas de contorno e de interface
+        contornos = self.formulacao.avaliar_contornos(input_model, self.lista_apoios)
+        loss_bc = self.formulacao.boundary_loss(input_model, self.lista_apoios, contornos)
+        loss_int, loss_jump = self.formulacao.interface_loss(input_model, self.lista_apoios, self.fy_max, self.mz_max, key, contornos)
     
         loss = pde_weight * loss_pde + bc_weight * loss_bc + int_weight * loss_int + jump_weight * loss_jump
 
@@ -309,10 +311,12 @@ class PINNViga:
                         x_scaled = min_val + (max_val - min_val) * torch.rand(tam, 1)
                         trecho['vetor_x'] = x_scaled.requires_grad_(True)
 
-            self.loss_pde_variation.append(loss_pde)
-            self.loss_bc_variation.append(loss_bc)
-            self.loss_int_variation.append(loss_int)
-            self.loss_jump_variation.append(loss_jump)
+            # Guarda só o valor: o tensor carregaria o grafo computacional da época,
+            # e o histórico manteria vivos os grafos de todas as épocas na memória
+            self.loss_pde_variation.append(float(loss_pde.detach()))
+            self.loss_bc_variation.append(float(loss_bc.detach()))
+            self.loss_int_variation.append(float(loss_int.detach()))
+            self.loss_jump_variation.append(float(loss_jump.detach()))
 
         self.loss = self.loss_pde_variation + self.loss_bc_variation + self.loss_int_variation + self.loss_jump_variation
 
